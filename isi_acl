@@ -1,0 +1,161 @@
+#!/usr/local/bin/python
+
+import papi
+import sys
+import getpass
+import json
+import time
+import os
+import datetime
+import getopt
+
+def usage():
+  sys.stderr.write ("Usage: isi_acl [-ch] add|remove user|group allow|deny ace[,ace,ace,...] path\n")
+  sys.stderr.write ("       isi_acl [-ch] add|remove everyone allow|deny ace[,ace,ace,...] path\n")
+  sys.stderr.write ("       isi_acl [-ch] view path\n")
+  sys.stderr.write ("-c | --cluster : Name or IP address of the cluster other than default\n")
+  sys.stderr.write ("-h | --help : Prints this message\n")
+  exit (0)
+  
+mon_s = ("X", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+cluster = "10.111.158.130"
+optlist, args = getopt.getopt (sys.argv[1:], 'hc:', ["help", "cluster="])
+for opt, a in optlist:
+  if opt in ('-c', '--cluster'):
+    cluster = a
+  if opt in ('-h', '--help'):
+    usage()
+user = raw_input ("User: ")
+password = getpass.getpass ("Password: ")
+update_flag = True
+#print "DEB: ARGS = " + str(args)
+path = "/namespace" + args[-1] + "/?acl"
+unix_path = "/namespace" + args[-1] + "/?metadata"
+cmd = args[0]
+if cmd != "view":
+  if args[2].lower() != "everyone":
+    base = 1
+    type = args[1]
+  else:
+    base = 0
+    type = "wellknown"
+  name = args[1 + base]
+  accesstype = args[2 + base]
+  accessright = args[3 + base]
+  if accesstype != "allow" and accesstype != "deny":
+    sys.stderr.write ("The access type must be 'allow' or 'deny'\n")
+    exit (1)
+(status, reason, resp) = papi.call (cluster, '8080', 'GET', path, '', 'any', 'text/plain', user, password)
+if status != 200:
+  error_str = "ERROR: Bad Status: " + str(status) + "\n"
+  sys.stderr.write (error_str)
+  exit (status)
+metadata = json.loads (resp)
+if cmd == "add":
+  metadata['acl'].append({"inhert_flags":[], "trustee": {"type": type, "name":name}, "accesstype": accesstype, "accessrights": [ accessright]})
+elif cmd == "remove":
+  i = 0;
+  for x in metadata['acl']:
+    # print x['trustee']['type'] + " // " + x['trustee']['name'].lower() + " // " + x['accesstype'] 
+    # print "USER: " + type + " // " + name.lower() + " // " + accesstype
+    if x['trustee']['type'] == type and x['trustee']['name'].lower() == name.lower() and x['accesstype'] == accesstype:
+      # print "INITIAL MATCH ON " + str(i)
+      for y in metadata['acl'][i]['accessrights']:
+        # print "Y=" + y + " // AR=" + accessright
+        if y == accessright:
+          # print "FOUND IN " + str(i)
+          del (metadata['acl'][i])
+    i += 1
+elif cmd  == "view":
+  update_flag = False
+else:
+  sys.stderr.write ("Command must be 'add', 'remove', or 'view'\n")
+  exit (1)
+if update_flag == True:
+  new_meta = json.dumps (metadata, ensure_ascii=False)
+  (status, reason, resp) = papi.call (cluster, '8080', 'PUT', path, new_meta, 'any', 'application/json', user, password)
+  if status != 200:
+    error_str = "ERROR: Bad Status: " + str(status) + "\n"
+    sys.stderr.write (error_str)
+    exit (status)
+(status, reaason, resp) = papi.call (cluster, '8080', 'GET', path, '', 'any', 'text/plain', 'root', password)
+if status != 200:
+  error_str = "ERROR: Bad Status: " + str(status) + "\n"
+  sys.stderr.write (error_str)
+  exit (status)
+metadata = json.loads (resp)
+(status, reaason, resp) = papi.call (cluster, '8080', 'GET', unix_path, '', 'any', 'text/plain', 'root', password)
+if status != 200:
+  error_str = "ERROR: Bad Status: " + str(status) + "\n"
+  sys.stderr.write (error_str)
+  exit (status)
+unix_meta = json.loads(resp)
+for x in unix_meta['attrs']:
+  if x['name'] == "size":
+    f_size = x['value']
+  elif x['name'] == "mtime_val":
+    f_time = x['value']
+  elif x['name'] == "owner":
+    f_owner = x['value']
+  elif x['name'] == "group":
+    f_group = x['value']
+  elif x['name'] == "nlink":
+    f_nlink = x['value']
+  elif x['name'] == "type":
+    f_type = x['value']
+  elif x['name'] == "mode":
+    f_mode = x['value']
+    f_mode_list = list (f_mode)
+    f_mode_list.pop(0)
+if f_type == "container":
+  sys.stdout.write ("d")
+else:
+  sys.stdout.write ("-")
+for o in f_mode_list:
+  o_int = int (o)
+  if (o_int > 3 and o_int < 8):
+    sys.stdout.write("r")
+  else:
+    sys.stdout.write ("-")
+  if (o_int == 2 or o_int == 6 or o_int == 7):
+    sys.stdout.write ("w")
+  else:
+    sys.stdout.write ("-")
+  if (o_int == 1 or o_int == 3 or o_int == 5 or o_int == 7):
+    sys.stdout.write ("x")
+  else:
+    sys.stdout.write ("-")
+if metadata['authoritative'] == "acl":
+  sys.stdout.write (" +  ")
+else:
+  sys.stdout.write ("    ")
+sys.stdout.write (str(f_nlink) + " " + str(f_owner) + "  " + f_group + "  " + str(f_size) + " ")
+now = time.time()
+f_dt = datetime.datetime.fromtimestamp(f_time)
+f_dt_mon = int(f_dt.strftime("%m"))
+f_mon = mon_s[f_dt_mon]
+sys.stdout.write (f_mon + " " + f_dt.strftime("%d") + " ")
+if now - int(f_time) > 15780000:
+  sys.stdout.write (f_dt.strftime("%Y") + " ")
+else:
+  sys.stdout.write (f_dt.strftime("%H:%M:%S") + " ")
+print (args[-1])
+print (" OWNER: " + metadata['owner']['type'] + ":" + metadata['owner']['name'])
+print (" GROUP: " + metadata['group']['type'] + ":" + metadata['group']['name'])
+
+if metadata['authoritative'] == "mode":
+  print " SYNTHETIC ACL"
+a_cnt = 0
+for x in metadata['acl']:
+  sys.stdout.write (" "  + str(a_cnt) + ": " + x['trustee']['type'] + ":" + x['trustee']['name'] + " " + x['accesstype'] + " ")
+  first = True
+  for y in x['accessrights']:
+    if first == True:
+      sys.stdout.write (y)
+    else:
+      sys.stdout.write ("," + y)
+    first = False
+  for y in x['inherit_flags']:
+    sys.stdout.write ("," + y)
+  sys.stdout.write ("\n")
+  a_cnt += 1
